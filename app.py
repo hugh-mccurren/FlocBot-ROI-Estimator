@@ -196,11 +196,15 @@ section[data-testid="stSidebar"] label {
     letter-spacing: 0.04em;
 }
 section[data-testid="stSidebar"] .stNumberInput input,
-section[data-testid="stSidebar"] .stSelectbox > div > div {
+section[data-testid="stSidebar"] .stSelectbox > div > div,
+section[data-testid="stSidebar"] .stTextInput input {
     background: #1e293b !important;
     border: 1px solid #334155 !important;
-    color: #f1f5f9 !important;
+    color: #f3f4f6 !important;
     border-radius: 6px !important;
+}
+section[data-testid="stSidebar"] .stTextInput input::placeholder {
+    color: #9ca3af !important;
 }
 section[data-testid="stSidebar"] hr {
     border-color: #334155 !important;
@@ -289,6 +293,21 @@ section[data-testid="stSidebar"] button[kind="secondary"]:hover {
 with st.sidebar:
     st.markdown("## FlocBot ROI Estimator")
     st.caption(f"{APP_VERSION}")
+
+    # Reset defaults
+    if st.button("Reset defaults", use_container_width=True):
+        st.session_state["overfeed_input"] = 7.0
+        for k in list(st.session_state.keys()):
+            if k != "overfeed_input":
+                del st.session_state[k]
+        st.rerun()
+
+    # Facility name
+    facility_name = st.text_input(
+        "Facility name (optional)",
+        value="",
+        help="Appears on the PDF export if provided.",
+    )
 
     # Quick scenarios
     st.markdown("---")
@@ -445,6 +464,11 @@ st.markdown(
     '<h1 style="margin-bottom:0.1rem;">FlocBot ROI Estimator</h1>',
     unsafe_allow_html=True,
 )
+if facility_name:
+    st.markdown(
+        f'<p style="font-size:0.9rem;color:#4a5568;margin:0 0 0.3rem 0;">Facility: {facility_name}</p>',
+        unsafe_allow_html=True,
+    )
 st.caption("Coagulant optimization savings calculator  \u00b7  Adjust inputs in the sidebar")
 
 if errors:
@@ -475,10 +499,16 @@ with k1:
 with k2:
     st.markdown(kpi_card("Est. Annual Savings", f"${annual_sav:,.0f}", f"at {overfeed_pct:.1f}% reduction"), unsafe_allow_html=True)
 with k3:
-    st.markdown(kpi_card("Payback Period", payback_str, payback_sub), unsafe_allow_html=True)
-    st.caption("Cashflow payback accounts for escalation & discount rate; simple payback uses Year 1 savings only.")
+    st.markdown(
+        kpi_card(
+            'Payback Period <span title="Cashflow payback accounts for escalation &amp; discount rate; simple payback uses Year 1 savings only." style="cursor:help;color:#94a3b8;font-size:0.7rem;">&#9432;</span>',
+            payback_str,
+            payback_sub,
+        ),
+        unsafe_allow_html=True,
+    )
 with k4:
-    st.markdown(kpi_card(net_label, f"${net_5yr:,.0f}", f"{escalation_pct:.0f}% escalation" if escalation_pct > 0 else "no escalation"), unsafe_allow_html=True)
+    st.markdown(kpi_card(net_label, f"${net_5yr:,.0f}", f"{escalation_pct:.1f}% escalation" if escalation_pct > 0 else "no escalation"), unsafe_allow_html=True)
 
 # ---- ROI status banner ----
 if payback_yrs is None:
@@ -491,7 +521,7 @@ elif payback_yrs <= 2:
     roi_text = (
         f"<strong>Strong ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
         f"at {overfeed_pct:.1f}% reduction"
-        + (f" with {escalation_pct:.0f}% chemical escalation." if escalation_pct > 0 else ".")
+        + (f" with {escalation_pct:.1f}% chemical escalation." if escalation_pct > 0 else ".")
     )
 elif payback_yrs <= 4:
     roi_class = "roi-ok"
@@ -512,8 +542,8 @@ if break_even is not None:
 
 st.markdown(f'<div class="roi-banner {roi_class}">{roi_text}</div>', unsafe_allow_html=True)
 
-# Advisory
-if baseline_cost > 0 and break_even is not None and break_even > 25:
+# Advisory — only relevant for subscription model
+if cost_mode == "Annual subscription" and baseline_cost > 0 and break_even is not None and break_even > 25:
     st.warning(
         "At this spend level, an annual subscription may not pencil. "
         "Consider upfront purchase or targeting higher-spend facilities."
@@ -645,9 +675,10 @@ with st.expander("Calculation details"):
             language=None,
         )
     st.markdown("---")
-    st.markdown(
-        f"**Annual savings** = ${baseline_cost:,.0f} x {overfeed_pct:.1f}% = **${annual_sav:,.0f}**"
-    )
+    cost_str = f"{baseline_cost:,.0f}"
+    pct_str = f"{overfeed_pct:.1f}"
+    sav_str = f"{annual_sav:,.0f}"
+    st.write(f"**Annual savings** = \\${cost_str} \u00d7 {pct_str}% = \\${sav_str}")
     st.markdown("---")
     esc_note = f", {escalation_pct:.1f}% chemical escalation" if escalation_pct > 0 else ""
     disc_note = f", discounted at {discount_rate_pct:.1f}%" if discount_rate_pct > 0 else ""
@@ -675,7 +706,10 @@ def generate_pdf():
     pdf.cell(0, 14, "FlocBot ROI Estimate", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 6, f"{APP_VERSION}  |  Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf_subtitle = f"{APP_VERSION}  |  Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if facility_name:
+        pdf_subtitle = f"{facility_name}  |  {pdf_subtitle}"
+    pdf.cell(0, 6, pdf_subtitle, new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(6)
 
