@@ -1,253 +1,797 @@
 import streamlit as st
-import io
 from fpdf import FPDF
+import pandas as pd
+import altair as alt
+from datetime import datetime
 
-st.set_page_config(page_title="FlocBot ROI Estimator", page_icon="💧", layout="centered")
+APP_VERSION = "v0.3"
+SENSITIVITY_PCTS = [3, 5, 7, 10, 12]
 
-st.title("FlocBot ROI Estimator")
-st.markdown("Estimate the return on investment from optimizing coagulant dosing with FlocBot.")
+# ---------------------------------------------------------------------------
+# Pure calculation functions
+# ---------------------------------------------------------------------------
 
-# --- Scenario buttons ---
-st.subheader("Quick Scenarios")
-scenario_cols = st.columns(3)
-with scenario_cols[0]:
-    if st.button("Conservative (3%)", use_container_width=True):
-        st.session_state["overfeed_pct"] = 3.0
-with scenario_cols[1]:
-    if st.button("Moderate (7%)", use_container_width=True):
-        st.session_state["overfeed_pct"] = 7.0
-with scenario_cols[2]:
-    if st.button("Aggressive (12%)", use_container_width=True):
-        st.session_state["overfeed_pct"] = 12.0
+def compute_baseline_from_dose(dose_mg_l, flow_mgd, unit_cost_per_lb, operating_days=365):
+    lbs_per_day = dose_mg_l * flow_mgd * 8.34
+    lbs_per_year = lbs_per_day * operating_days
+    return lbs_per_year * unit_cost_per_lb, lbs_per_day, lbs_per_year
 
-# --- Inputs ---
-st.subheader("Inputs")
 
-annual_spend = st.number_input(
-    "Annual coagulant spend ($/year) — recommended",
-    min_value=0.0,
-    value=0.0,
-    step=10000.0,
-    format="%.2f",
-    help="If you know your total annual coagulant spend, enter it here. This is the most accurate baseline. Leave at 0 to calculate from dose instead.",
+def compute_annual_savings(baseline_cost, overfeed_pct):
+    return baseline_cost * (overfeed_pct / 100.0)
+
+
+def compute_flocbot_total_cost(cost_mode, flocbot_annual, flocbot_upfront, years=5):
+    if cost_mode == "Annual subscription":
+        return flocbot_annual * years
+    return flocbot_upfront
+
+
+def compute_5yr_net(baseline_cost, overfeed_pct, cost_mode,
+                    flocbot_annual, flocbot_upfront, escalation_pct,
+                    discount_rate_pct, years=5):
+    r = escalation_pct / 100.0
+    d = discount_rate_pct / 100.0
+    total_savings = 0.0
+    for yr in range(years):
+        yr_savings = baseline_cost * (overfeed_pct / 100.0) * ((1 + r) ** yr)
+        if d > 0:
+            yr_savings /= (1 + d) ** yr
+        total_savings += yr_savings
+    total_flocbot = compute_flocbot_total_cost(cost_mode, flocbot_annual, flocbot_upfront, years)
+    return total_savings, total_flocbot, total_savings - total_flocbot
+
+
+def compute_payback_years(annual_savings, cost_mode, flocbot_annual, flocbot_upfront):
+    """Simple payback using Year 1 savings only (no escalation)."""
+    if annual_savings <= 0:
+        return None
+    if cost_mode == "Annual subscription":
+        net = annual_savings - flocbot_annual
+        if net <= 0:
+            return None
+        return flocbot_annual / annual_savings
+    return flocbot_upfront / annual_savings
+
+
+def compute_payback_cashflow(baseline_cost, overfeed_pct, cost_mode,
+                             flocbot_annual, flocbot_upfront,
+                             escalation_pct, discount_rate_pct, years=20):
+    """Cashflow-based payback with escalation and optional discounting.
+
+    Returns payback in years (with fractional interpolation), or None if
+    cumulative net never reaches zero within *years*.
+    """
+    r = escalation_pct / 100.0
+    d = discount_rate_pct / 100.0
+    cumulative = 0.0
+    prev_cumulative = 0.0
+    for yr in range(years):
+        savings = baseline_cost * (overfeed_pct / 100.0) * ((1 + r) ** yr)
+        if d > 0:
+            savings /= (1 + d) ** yr
+        if cost_mode == "Annual subscription":
+            fb_cost = flocbot_annual
+        else:
+            fb_cost = flocbot_upfront if yr == 0 else 0.0
+        net = savings - fb_cost
+        prev_cumulative = cumulative
+        cumulative += net
+        if cumulative >= 0 and prev_cumulative < 0:
+            # Interpolate within this year
+            fraction = (0 - prev_cumulative) / net if net != 0 else 0
+            return yr + fraction
+        if cumulative >= 0 and yr == 0:
+            # Paid back within Year 1
+            if net > 0:
+                # Fraction of the year needed: cost portion / savings
+                if cost_mode == "Annual subscription":
+                    return flocbot_annual / savings if savings > 0 else None
+                return flocbot_upfront / savings if savings > 0 else None
+            return None
+    return None
+
+
+def compute_break_even_pct(baseline_cost, cost_mode, flocbot_annual, flocbot_upfront):
+    if baseline_cost <= 0:
+        return None
+    if cost_mode == "Annual subscription":
+        return (flocbot_annual / baseline_cost) * 100.0
+    return (flocbot_upfront / baseline_cost) * 100.0
+
+
+def format_payback(payback_years):
+    if payback_years is None:
+        return "No payback at these inputs."
+    months_total = payback_years * 12
+    if months_total < 1:
+        return "< 1 month"
+    years = int(months_total // 12)
+    months = int(months_total % 12)
+    if years > 0 and months > 0:
+        return f"{years}y {months}m"
+    if years > 0:
+        return f"{years}y"
+    return f"{months} months"
+
+
+def compute_yearly_cashflows(baseline_cost, overfeed_pct, cost_mode,
+                             flocbot_annual, flocbot_upfront, escalation_pct,
+                             discount_rate_pct, years=5):
+    r = escalation_pct / 100.0
+    d = discount_rate_pct / 100.0
+    rows = []
+    cumulative = 0.0
+    for yr in range(years):
+        savings = baseline_cost * (overfeed_pct / 100.0) * ((1 + r) ** yr)
+        if d > 0:
+            savings /= (1 + d) ** yr
+        if cost_mode == "Annual subscription":
+            fb_cost = flocbot_annual
+        else:
+            fb_cost = flocbot_upfront if yr == 0 else 0.0
+        net = savings - fb_cost
+        cumulative += net
+        rows.append({
+            "Year": yr + 1,
+            "Savings": savings,
+            "FlocBot Cost": fb_cost,
+            "Net": net,
+            "Cumulative": cumulative,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_sensitivity_data(baseline_cost, cost_mode, flocbot_annual,
+                           flocbot_upfront, escalation_pct, discount_rate_pct):
+    rows = []
+    for pct in SENSITIVITY_PCTS:
+        annual_sav = compute_annual_savings(baseline_cost, pct)
+        _, _, net_5yr = compute_5yr_net(
+            baseline_cost, pct, cost_mode,
+            flocbot_annual, flocbot_upfront,
+            escalation_pct, discount_rate_pct,
+        )
+        rows.append({
+            "Overfeed Reduction (%)": pct,
+            "Annual Savings": annual_sav,
+            "5-Year Net Savings": net_5yr,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_sensitivity_table(sens_df):
+    display = sens_df.copy()
+    display["Overfeed Reduction (%)"] = display["Overfeed Reduction (%)"].apply(lambda x: f"{x}%")
+    display["Annual Savings"] = display["Annual Savings"].apply(lambda x: f"${x:,.0f}")
+    display["5-Year Net Savings"] = display["5-Year Net Savings"].apply(lambda x: f"${x:,.0f}")
+    return display
+
+
+# ---------------------------------------------------------------------------
+# Page config & CSS
+# ---------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="FlocBot ROI Estimator",
+    page_icon="\U0001f9ea",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-with st.expander("Optional: calculate from dose instead", expanded=annual_spend == 0.0):
-    flow_mgd = st.number_input(
-        "Flow (MGD)",
-        min_value=0.0,
-        value=1.0,
-        step=0.1,
-        format="%.2f",
-        help="Average daily flow in million gallons per day.",
+st.markdown("""
+<style>
+/* ---- Global ---- */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f1b2d 0%, #1a2940 100%);
+}
+section[data-testid="stSidebar"] * {
+    color: #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] label {
+    color: #94a3b8 !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+section[data-testid="stSidebar"] .stNumberInput input,
+section[data-testid="stSidebar"] .stSelectbox > div > div {
+    background: #1e293b !important;
+    border: 1px solid #334155 !important;
+    color: #f1f5f9 !important;
+    border-radius: 6px !important;
+}
+section[data-testid="stSidebar"] hr {
+    border-color: #334155 !important;
+}
+
+/* ---- KPI cards ---- */
+div[data-testid="stHorizontalBlock"] div.kpi-card {
+    border-radius: 10px;
+    padding: 0;
+}
+.kpi-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    text-align: center;
+}
+.kpi-card .kpi-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.3rem;
+}
+.kpi-card .kpi-value {
+    font-size: 1.65rem;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.2;
+}
+.kpi-card .kpi-sub {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    margin-top: 0.15rem;
+}
+
+/* ---- ROI banner ---- */
+.roi-banner {
+    border-radius: 8px;
+    padding: 0.85rem 1.2rem;
+    font-size: 0.92rem;
+    font-weight: 500;
+    margin: 0.6rem 0 1rem 0;
+    line-height: 1.5;
+}
+.roi-strong  { background: #ecfdf5; border-left: 4px solid #10b981; color: #065f46; }
+.roi-ok      { background: #eff6ff; border-left: 4px solid #3b82f6; color: #1e3a5f; }
+.roi-weak    { background: #fff7ed; border-left: 4px solid #f59e0b; color: #78350f; }
+
+/* ---- Section headers ---- */
+.section-hdr {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #1e293b;
+    margin: 1.4rem 0 0.5rem 0;
+    padding-bottom: 0.3rem;
+    border-bottom: 2px solid #e2e8f0;
+}
+
+/* Sidebar scenario buttons */
+section[data-testid="stSidebar"] button[kind="secondary"] {
+    background: #1e293b !important;
+    border: 1px solid #475569 !important;
+    color: #e2e8f0 !important;
+    border-radius: 6px !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    padding: 0.35rem 0 !important;
+}
+section[data-testid="stSidebar"] button[kind="secondary"]:hover {
+    background: #334155 !important;
+    border-color: #60a5fa !important;
+}
+
+/* ---- Misc ---- */
+.stDataFrame { border-radius: 8px; overflow: hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Sidebar — all inputs
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown("## FlocBot ROI Estimator")
+    st.caption(f"{APP_VERSION}")
+
+    # Quick scenarios
+    st.markdown("---")
+    st.markdown("**Quick Scenarios**")
+    sc = st.columns(3)
+    with sc[0]:
+        if st.button("3%", key="s3", help="Conservative", use_container_width=True):
+            st.session_state["overfeed_input"] = 3.0
+    with sc[1]:
+        if st.button("7%", key="s7", help="Moderate", use_container_width=True):
+            st.session_state["overfeed_input"] = 7.0
+    with sc[2]:
+        if st.button("12%", key="s12", help="Aggressive", use_container_width=True):
+            st.session_state["overfeed_input"] = 12.0
+
+    st.markdown("---")
+
+    # Baseline method
+    st.markdown("**Baseline Chemical Cost**")
+    baseline_method = st.radio(
+        "Method",
+        ["Annual spend (recommended)", "Calculate from dose"],
+        label_visibility="collapsed",
+        help="Choose the most accurate method you have data for.",
     )
+    use_spend = baseline_method.startswith("Annual spend")
 
-    coagulant_type = st.selectbox(
-        "Coagulant type",
-        ["Alum", "Ferric Chloride", "PAC (Polyaluminum Chloride)", "ACH", "Other"],
-        help="Select the coagulant used at your plant.",
-    )
-
-    unit_cost = st.number_input(
-        "Coagulant unit cost ($/lb)",
-        min_value=0.0,
-        value=0.15,
-        step=0.01,
-        format="%.4f",
-        help="Cost per pound of coagulant as delivered.",
-    )
-
-    current_dose = st.number_input(
-        "Current dose (mg/L)",
-        min_value=0.0,
-        value=30.0,
-        step=1.0,
-        format="%.1f",
-        help="Current average coagulant dose in mg/L.",
-    )
-
-st.markdown("---")
-
-overfeed_pct = st.number_input(
-    "Avoidable overfeed (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=st.session_state.get("overfeed_pct", 7.0),
-    step=0.5,
-    format="%.1f",
-    help="Estimated percentage of current coagulant use that is avoidable overfeed. Use the scenario buttons above for common estimates.",
-    key="overfeed_input",
-)
-
-st.markdown("---")
-st.markdown("**FlocBot Cost**")
-cost_mode = st.radio(
-    "Cost basis",
-    ["Annual subscription", "Upfront purchase"],
-    horizontal=True,
-    help="Choose how you'll pay for FlocBot.",
-)
-
-if cost_mode == "Annual subscription":
-    flocbot_annual = st.number_input(
-        "FlocBot annual cost ($/year)",
-        min_value=0.0,
-        value=15000.0,
-        step=1000.0,
-        format="%.2f",
-    )
-    flocbot_upfront = 0.0
-else:
-    flocbot_upfront = st.number_input(
-        "FlocBot upfront cost ($)",
-        min_value=0.0,
-        value=75000.0,
-        step=1000.0,
-        format="%.2f",
-    )
-    flocbot_annual = 0.0
-
-# --- Calculations ---
-# Baseline annual chemical cost
-if annual_spend > 0:
-    baseline_cost = annual_spend
-    baseline_source = "provided"
-else:
-    # mg/L × MGD × 8.34 lb·L/(mg·MG) = lb/day
-    lbs_per_day = current_dose * flow_mgd * 8.34
-    baseline_cost = lbs_per_day * unit_cost * 365.0
-    baseline_source = "calculated"
-
-annual_savings = baseline_cost * (overfeed_pct / 100.0)
-
-if cost_mode == "Annual subscription":
-    net_annual_savings = annual_savings - flocbot_annual
-    if net_annual_savings > 0:
-        payback_years = flocbot_annual / net_annual_savings  # fraction of first year
-        payback_months = (flocbot_annual / annual_savings) * 12 if annual_savings > 0 else float("inf")
+    if use_spend:
+        annual_spend = st.number_input(
+            "Annual coagulant spend ($/yr)",
+            min_value=0.0, value=250000.0, step=10000.0, format="%.0f",
+            help="Your plant's total annual coagulant expenditure.",
+        )
+        flow_mgd = 0.0; coagulant_type = ""; unit_cost = 0.0; current_dose = 0.0
     else:
-        payback_months = float("inf")
-    five_year_net = (annual_savings * 5) - (flocbot_annual * 5)
-else:
-    net_annual_savings = annual_savings
-    if annual_savings > 0:
-        payback_months = (flocbot_upfront / annual_savings) * 12
-    else:
-        payback_months = float("inf")
-    five_year_net = (annual_savings * 5) - flocbot_upfront
+        annual_spend = 0.0
+        flow_mgd = st.number_input(
+            "Flow (MGD)", min_value=0.0, value=1.0, step=0.1, format="%.2f",
+            help="Average daily flow in million gallons per day.",
+        )
+        coagulant_type = st.selectbox(
+            "Coagulant type",
+            ["Alum", "Ferric Chloride", "PAC (Polyaluminum Chloride)", "ACH", "Other"],
+        )
+        unit_cost = st.number_input(
+            "Unit cost ($/lb)", min_value=0.0, value=0.15, step=0.01, format="%.4f",
+            help="Cost per pound of coagulant as delivered.",
+        )
+        current_dose = st.number_input(
+            "Current dose (mg/L)", min_value=0.0, value=30.0, step=1.0, format="%.1f",
+        )
 
-# --- Input validation ---
+    st.markdown("---")
+
+    if "overfeed_input" not in st.session_state:
+        st.session_state["overfeed_input"] = 7.0
+    overfeed_pct = st.number_input(
+        "Avoidable overfeed (%)",
+        min_value=0.0, max_value=100.0,
+        step=0.5, format="%.1f",
+        help="Estimated % of current coagulant use that is avoidable overfeed.",
+        key="overfeed_input",
+    )
+
+    st.markdown("---")
+    st.markdown("**FlocBot Cost**")
+    cost_mode = st.radio(
+        "Cost basis",
+        ["Upfront purchase", "Annual subscription"],
+        horizontal=True,
+    )
+    if cost_mode == "Upfront purchase":
+        flocbot_upfront = st.number_input(
+            "Upfront cost ($)", min_value=0.0, value=75000.0, step=1000.0, format="%.0f",
+        )
+        flocbot_annual = 0.0
+    else:
+        flocbot_annual = st.number_input(
+            "Annual cost ($/yr)", min_value=0.0, value=15000.0, step=1000.0, format="%.0f",
+        )
+        flocbot_upfront = 0.0
+
+    # Advanced
+    st.markdown("---")
+    with st.expander("Advanced modeling"):
+        escalation_pct = st.number_input(
+            "Chemical escalation (%/yr)", min_value=0.0, max_value=50.0,
+            value=6.0, step=0.5, format="%.1f",
+            help="Expected annual increase in chemical prices (~6% industry avg).",
+        )
+        discount_rate_pct = st.number_input(
+            "Discount rate (%)", min_value=0.0, max_value=50.0,
+            value=0.0, step=0.5, format="%.1f",
+            help="If > 0, future savings are discounted to present value (NPV).",
+        )
+        operating_days = st.number_input(
+            "Operating days/year", min_value=1, max_value=366, value=365, step=1,
+        )
+
+# ---------------------------------------------------------------------------
+# Calculations
+# ---------------------------------------------------------------------------
+
 errors = []
-if annual_spend == 0:
+lbs_per_day = 0.0
+lbs_per_year = 0.0
+
+if use_spend:
+    if annual_spend <= 0:
+        errors.append("Annual coagulant spend must be greater than $0.")
+    baseline_cost = annual_spend
+    baseline_label = "provided"
+else:
     if flow_mgd <= 0:
         errors.append("Flow must be greater than 0.")
     if unit_cost <= 0:
         errors.append("Coagulant unit cost must be greater than 0.")
     if current_dose <= 0:
         errors.append("Current dose must be greater than 0.")
-if annual_spend == 0 and flow_mgd == 0 and current_dose == 0:
-    errors.append("Provide either annual coagulant spend or flow/dose/unit cost to calculate.")
+    baseline_cost, lbs_per_day, lbs_per_year = compute_baseline_from_dose(
+        current_dose, flow_mgd, unit_cost, operating_days,
+    )
+    baseline_label = "calculated"
 
-# --- Outputs ---
-st.subheader("Results")
+annual_sav = compute_annual_savings(baseline_cost, overfeed_pct)
+simple_payback_yrs = compute_payback_years(annual_sav, cost_mode, flocbot_annual, flocbot_upfront)
+payback_yrs = compute_payback_cashflow(
+    baseline_cost, overfeed_pct, cost_mode,
+    flocbot_annual, flocbot_upfront,
+    escalation_pct, discount_rate_pct,
+)
+total_sav_5yr, total_flocbot_5yr, net_5yr = compute_5yr_net(
+    baseline_cost, overfeed_pct, cost_mode,
+    flocbot_annual, flocbot_upfront,
+    escalation_pct, discount_rate_pct,
+)
+break_even = compute_break_even_pct(baseline_cost, cost_mode, flocbot_annual, flocbot_upfront)
+cashflow_df = compute_yearly_cashflows(
+    baseline_cost, overfeed_pct, cost_mode,
+    flocbot_annual, flocbot_upfront,
+    escalation_pct, discount_rate_pct,
+)
+sens_raw = build_sensitivity_data(
+    baseline_cost, cost_mode, flocbot_annual, flocbot_upfront,
+    escalation_pct, discount_rate_pct,
+)
+
+# ---------------------------------------------------------------------------
+# Main area — results dashboard
+# ---------------------------------------------------------------------------
+
+# Header
+st.markdown(
+    '<h1 style="margin-bottom:0.1rem;">FlocBot ROI Estimator</h1>',
+    unsafe_allow_html=True,
+)
+st.caption("Coagulant optimization savings calculator  \u00b7  Adjust inputs in the sidebar")
 
 if errors:
     for e in errors:
         st.error(e)
+    st.stop()
+
+# ---- KPI cards ----
+def kpi_card(label, value, sub=""):
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    return f"""<div class="kpi-card">
+        <div class="kpi-label">{label}</div>
+        <div class="kpi-value">{value}</div>
+        {sub_html}
+    </div>"""
+
+payback_str = format_payback(payback_yrs)
+simple_payback_str = format_payback(simple_payback_yrs)
+net_label = "5-Year Net Savings (NPV)" if discount_rate_pct > 0 else "5-Year Net Savings"
+src_note = "from plant records" if baseline_label == "provided" else "calculated from dose"
+
+# Build payback subtitle
+payback_sub = f"Simple (Yr 1): {simple_payback_str}"
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.markdown(kpi_card("Annual Chemical Cost", f"${baseline_cost:,.0f}", src_note), unsafe_allow_html=True)
+with k2:
+    st.markdown(kpi_card("Est. Annual Savings", f"${annual_sav:,.0f}", f"at {overfeed_pct:.1f}% reduction"), unsafe_allow_html=True)
+with k3:
+    st.markdown(kpi_card("Payback Period", payback_str, payback_sub), unsafe_allow_html=True)
+    st.caption("Cashflow payback accounts for escalation & discount rate; simple payback uses Year 1 savings only.")
+with k4:
+    st.markdown(kpi_card(net_label, f"${net_5yr:,.0f}", f"{escalation_pct:.0f}% escalation" if escalation_pct > 0 else "no escalation"), unsafe_allow_html=True)
+
+# ---- ROI status banner ----
+if payback_yrs is None:
+    roi_class = "roi-weak"
+    roi_text = (
+        f"<strong>Weak ROI:</strong> savings do not exceed FlocBot cost at {overfeed_pct:.1f}% overfeed reduction."
+    )
+elif payback_yrs <= 2:
+    roi_class = "roi-strong"
+    roi_text = (
+        f"<strong>Strong ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
+        f"at {overfeed_pct:.1f}% reduction"
+        + (f" with {escalation_pct:.0f}% chemical escalation." if escalation_pct > 0 else ".")
+    )
+elif payback_yrs <= 4:
+    roi_class = "roi-ok"
+    roi_text = (
+        f"<strong>Reasonable ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
+        f"at {overfeed_pct:.1f}% reduction."
+    )
 else:
-    col1, col2 = st.columns(2)
-    with col1:
-        src_label = " (provided)" if baseline_source == "provided" else " (calculated)"
-        st.metric("Annual Chemical Cost" + src_label, f"${baseline_cost:,.0f}")
-        st.metric("Estimated Annual Savings", f"${annual_savings:,.0f}")
-    with col2:
-        if payback_months == float("inf"):
-            st.metric("Payback Period", "N/A")
-        elif payback_months < 1:
-            st.metric("Payback Period", "< 1 month")
-        else:
-            years = int(payback_months // 12)
-            months = int(payback_months % 12)
-            if years > 0 and months > 0:
-                st.metric("Payback Period", f"{years}y {months}m")
-            elif years > 0:
-                st.metric("Payback Period", f"{years}y")
-            else:
-                st.metric("Payback Period", f"{months} months")
-        st.metric("5-Year Net Savings", f"${five_year_net:,.0f}")
+    roi_class = "roi-weak"
+    roi_text = (
+        f"<strong>Extended payback:</strong> ~{format_payback(payback_yrs)} "
+        f"at {overfeed_pct:.1f}% reduction."
+    )
 
-    if five_year_net < 0:
-        st.warning("FlocBot cost exceeds projected savings over 5 years at this overfeed estimate.")
+if break_even is not None:
+    be_qualifier = " in Year 1" if cost_mode == "Upfront purchase" else ""
+    roi_text += f"<br>Break-even overfeed reduction needed{be_qualifier}: <strong>{break_even:.1f}%</strong>"
 
-    # --- PDF Download ---
-    def generate_pdf():
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 18)
-        pdf.cell(0, 12, "FlocBot ROI Estimate", new_x="LMARGIN", new_y="NEXT", align="C")
-        pdf.ln(6)
+st.markdown(f'<div class="roi-banner {roi_class}">{roi_text}</div>', unsafe_allow_html=True)
 
-        pdf.set_font("Helvetica", "", 11)
+# Advisory
+if baseline_cost > 0 and break_even is not None and break_even > 25:
+    st.warning(
+        "At this spend level, an annual subscription may not pencil. "
+        "Consider upfront purchase or targeting higher-spend facilities."
+    )
 
-        def add_row(label, value):
-            pdf.set_font("Helvetica", "B", 11)
-            pdf.cell(90, 8, label, new_x="RIGHT")
-            pdf.set_font("Helvetica", "", 11)
-            pdf.cell(0, 8, value, new_x="LMARGIN", new_y="NEXT")
+# ---- Charts row ----
+st.markdown('<div class="section-hdr">5-Year Cashflow Projection</div>', unsafe_allow_html=True)
 
+chart_left, chart_right = st.columns([3, 2])
+
+with chart_left:
+    # Bar + line combo via Altair
+    cf = cashflow_df.copy()
+    cf["Year"] = cf["Year"].astype(str)
+
+    bars = alt.Chart(cf).mark_bar(
+        cornerRadiusTopLeft=4, cornerRadiusTopRight=4, size=36
+    ).encode(
+        x=alt.X("Year:N", axis=alt.Axis(labelAngle=0, title="Year")),
+        y=alt.Y("Net:Q", title="Dollars ($)"),
+        color=alt.condition(
+            alt.datum.Net >= 0,
+            alt.value("#10b981"),
+            alt.value("#f59e0b"),
+        ),
+        tooltip=[
+            alt.Tooltip("Year:N"),
+            alt.Tooltip("Savings:Q", format="$,.0f", title="Gross Savings"),
+            alt.Tooltip("FlocBot Cost:Q", format="$,.0f"),
+            alt.Tooltip("Net:Q", format="$,.0f", title="Net Savings"),
+            alt.Tooltip("Cumulative:Q", format="$,.0f"),
+        ],
+    )
+
+    line = alt.Chart(cf).mark_line(
+        point=alt.OverlayMarkDef(filled=True, size=50),
+        strokeWidth=2.5,
+        color="#3b82f6",
+    ).encode(
+        x="Year:N",
+        y=alt.Y("Cumulative:Q"),
+        tooltip=[
+            alt.Tooltip("Year:N"),
+            alt.Tooltip("Cumulative:Q", format="$,.0f", title="Cumulative Net"),
+        ],
+    )
+
+    zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+        strokeDash=[4, 4], color="#94a3b8"
+    ).encode(y="y:Q")
+
+    chart = (bars + line + zero_rule).properties(
+        height=320,
+    ).configure_axis(
+        labelFontSize=11, titleFontSize=12,
+    ).configure_view(
+        strokeWidth=0,
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.caption("Bars = annual net savings \u00b7 Line = cumulative net")
+
+with chart_right:
+    # Sensitivity chart
+    sr = sens_raw.copy()
+    sr["pct_str"] = sr["Overfeed Reduction (%)"].apply(lambda x: f"{x}%")
+
+    # Highlight point for selected overfeed
+    selected_net = None
+    for _, row in sr.iterrows():
+        if row["Overfeed Reduction (%)"] == overfeed_pct:
+            selected_net = row["5-Year Net Savings"]
+            break
+
+    sens_line = alt.Chart(sr).mark_line(
+        point=alt.OverlayMarkDef(filled=True, size=50),
+        strokeWidth=2.5,
+        color="#6366f1",
+    ).encode(
+        x=alt.X("Overfeed Reduction (%):Q", title="Overfeed Reduction (%)",
+                 scale=alt.Scale(domain=[0, 14])),
+        y=alt.Y("5-Year Net Savings:Q", title="5-Year Net Savings ($)"),
+        tooltip=[
+            alt.Tooltip("Overfeed Reduction (%):Q", format=".0f", title="Reduction"),
+            alt.Tooltip("5-Year Net Savings:Q", format="$,.0f"),
+        ],
+    )
+
+    sens_zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+        strokeDash=[4, 4], color="#94a3b8"
+    ).encode(y="y:Q")
+
+    layers = [sens_line, sens_zero]
+
+    # Add selected-point highlight if it matches a sensitivity row
+    if selected_net is not None:
+        highlight_df = pd.DataFrame({
+            "Overfeed Reduction (%)": [overfeed_pct],
+            "5-Year Net Savings": [selected_net],
+        })
+        highlight = alt.Chart(highlight_df).mark_point(
+            size=160, filled=True, color="#ef4444",
+        ).encode(
+            x="Overfeed Reduction (%):Q",
+            y="5-Year Net Savings:Q",
+        )
+        layers.append(highlight)
+
+    sens_chart = alt.layer(*layers).properties(height=320).configure_axis(
+        labelFontSize=11, titleFontSize=12,
+    ).configure_view(strokeWidth=0)
+    st.altair_chart(sens_chart, use_container_width=True)
+    st.caption("Sensitivity across overfeed reduction levels")
+
+# ---- Sensitivity table ----
+st.markdown('<div class="section-hdr">Sensitivity Table</div>', unsafe_allow_html=True)
+st.dataframe(build_sensitivity_table(sens_raw), hide_index=True, use_container_width=True)
+
+# ---- Calculation details ----
+with st.expander("Calculation details"):
+    st.markdown(f"**Baseline method:** {baseline_method}")
+    if use_spend:
+        st.markdown(f"Annual coagulant spend (entered): **${baseline_cost:,.2f}**/yr")
+    else:
+        st.markdown("**Dose-based calculation:**")
+        st.code(
+            f"lbs/day  = {current_dose:.1f} mg/L  x  {flow_mgd:.2f} MGD  x  8.34  =  {lbs_per_day:,.1f} lb/day\n"
+            f"lbs/year = {lbs_per_day:,.1f} lb/day  x  {operating_days} days  =  {lbs_per_year:,.0f} lb/year\n"
+            f"Annual cost = {lbs_per_year:,.0f} lb/year  x  ${unit_cost:.4f}/lb  =  ${baseline_cost:,.2f}",
+            language=None,
+        )
+    st.markdown("---")
+    st.markdown(
+        f"**Annual savings** = ${baseline_cost:,.0f} x {overfeed_pct:.1f}% = **${annual_sav:,.0f}**"
+    )
+    st.markdown("---")
+    esc_note = f", {escalation_pct:.1f}% chemical escalation" if escalation_pct > 0 else ""
+    disc_note = f", discounted at {discount_rate_pct:.1f}%" if discount_rate_pct > 0 else ""
+    st.markdown(f"**5-year projection{esc_note}{disc_note}:**")
+    st.latex(
+        r"\text{Net} = \sum_{y=0}^{4} "
+        r"\frac{\text{Baseline} \times \text{Overfeed\%} \times (1{+}r)^{y}}{(1{+}d)^{y}}"
+        r" \;-\; \text{FlocBot cost}"
+    )
+    det_c1, det_c2, det_c3 = st.columns(3)
+    det_c1.metric("Gross Savings (5 yr)", f"${total_sav_5yr:,.0f}")
+    det_c2.metric("FlocBot Cost (5 yr)", f"${total_flocbot_5yr:,.0f}")
+    det_c3.metric("Net Savings (5 yr)", f"${net_5yr:,.0f}")
+
+# ---- PDF Download ----
+st.markdown('<div class="section-hdr">Export</div>', unsafe_allow_html=True)
+
+
+def generate_pdf():
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(0, 14, "FlocBot ROI Estimate", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 6, f"{APP_VERSION}  |  Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(6)
+
+    def section_header(title):
         pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 10, "Inputs", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
         pdf.set_draw_color(200, 200, 200)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(2)
 
-        if annual_spend > 0:
-            add_row("Annual Coagulant Spend:", f"${annual_spend:,.2f}")
-        else:
-            add_row("Flow:", f"{flow_mgd:.2f} MGD")
-            add_row("Coagulant Type:", coagulant_type)
-            add_row("Unit Cost:", f"${unit_cost:.4f}/lb")
-            add_row("Current Dose:", f"{current_dose:.1f} mg/L")
+    def add_row(label, value):
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(95, 7, label, new_x="RIGHT")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 7, value, new_x="LMARGIN", new_y="NEXT")
 
-        add_row("Avoidable Overfeed:", f"{overfeed_pct:.1f}%")
-        if cost_mode == "Annual subscription":
-            add_row("FlocBot Annual Cost:", f"${flocbot_annual:,.2f}")
-        else:
-            add_row("FlocBot Upfront Cost:", f"${flocbot_upfront:,.2f}")
+    # Inputs
+    section_header("Inputs")
+    add_row("Baseline Method:", "Annual spend" if use_spend else "Flow + dose + unit cost")
+    if use_spend:
+        add_row("Annual Coagulant Spend:", f"${annual_spend:,.0f}")
+    else:
+        add_row("Flow:", f"{flow_mgd:.2f} MGD")
+        add_row("Coagulant Type:", coagulant_type)
+        add_row("Unit Cost:", f"${unit_cost:.4f}/lb")
+        add_row("Current Dose:", f"{current_dose:.1f} mg/L")
+        add_row("Operating Days:", str(operating_days))
+    add_row("Avoidable Overfeed:", f"{overfeed_pct:.1f}%")
+    if cost_mode == "Annual subscription":
+        add_row("FlocBot Annual Cost:", f"${flocbot_annual:,.0f}")
+    else:
+        add_row("FlocBot Upfront Cost:", f"${flocbot_upfront:,.0f}")
+    if escalation_pct > 0:
+        add_row("Chemical Escalation:", f"{escalation_pct:.1f}%/yr")
+    if discount_rate_pct > 0:
+        add_row("Discount Rate:", f"{discount_rate_pct:.1f}%")
 
-        pdf.ln(4)
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.cell(0, 10, "Results", new_x="LMARGIN", new_y="NEXT")
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        pdf.ln(2)
+    # Results
+    pdf.ln(4)
+    section_header("Results")
+    add_row("Annual Chemical Cost:", f"${baseline_cost:,.0f}")
+    add_row("Estimated Annual Savings:", f"${annual_sav:,.0f}")
+    add_row("Payback Period:", format_payback(payback_yrs))
+    net_lbl = "5-Year Net Savings (NPV):" if discount_rate_pct > 0 else "5-Year Net Savings:"
+    add_row(net_lbl, f"${net_5yr:,.0f}")
+    if break_even is not None:
+        be_lbl = "Break-even Overfeed (Year 1):" if cost_mode == "Upfront purchase" else "Break-even Overfeed:"
+        add_row(be_lbl, f"{break_even:.1f}%")
 
-        add_row("Annual Chemical Cost:", f"${baseline_cost:,.0f}")
-        add_row("Estimated Annual Savings:", f"${annual_savings:,.0f}")
-        if payback_months == float("inf"):
-            add_row("Payback Period:", "N/A")
-        elif payback_months < 1:
-            add_row("Payback Period:", "< 1 month")
-        else:
-            years = int(payback_months // 12)
-            months = int(payback_months % 12)
-            if years > 0 and months > 0:
-                add_row("Payback Period:", f"{years} year(s) {months} month(s)")
-            elif years > 0:
-                add_row("Payback Period:", f"{years} year(s)")
-            else:
-                add_row("Payback Period:", f"{months} month(s)")
-        add_row("5-Year Net Savings:", f"${five_year_net:,.0f}")
+    # Cashflow table
+    pdf.ln(4)
+    section_header("5-Year Cashflow")
+    pdf.set_font("Helvetica", "B", 9)
+    cw = [18, 38, 38, 38, 42]
+    cheaders = ["Year", "Savings", "FlocBot Cost", "Net", "Cumulative"]
+    for i, h in enumerate(cheaders):
+        pdf.cell(cw[i], 7, h, border=1, align="C", new_x="RIGHT")
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 9)
+    for _, row in cashflow_df.iterrows():
+        pdf.cell(cw[0], 7, str(int(row["Year"])), border=1, align="C", new_x="RIGHT")
+        pdf.cell(cw[1], 7, f"${row['Savings']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.cell(cw[2], 7, f"${row['FlocBot Cost']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.cell(cw[3], 7, f"${row['Net']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.cell(cw[4], 7, f"${row['Cumulative']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.ln()
 
-        pdf.ln(10)
-        pdf.set_font("Helvetica", "I", 9)
-        pdf.cell(0, 6, "Generated by FlocBot ROI Estimator", align="C")
+    # Sensitivity table
+    pdf.ln(4)
+    section_header("Sensitivity (Overfeed Reduction)")
+    pdf.set_font("Helvetica", "B", 9)
+    col_w = [40, 50, 50]
+    headers = ["Overfeed %", "Annual Savings", "5-Yr Net Savings"]
+    for i, h in enumerate(headers):
+        pdf.cell(col_w[i], 7, h, border=1, align="C", new_x="RIGHT")
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 9)
+    for _, row in sens_raw.iterrows():
+        pdf.cell(col_w[0], 7, f"{row['Overfeed Reduction (%)']:.0f}%", border=1, align="C", new_x="RIGHT")
+        pdf.cell(col_w[1], 7, f"${row['Annual Savings']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.cell(col_w[2], 7, f"${row['5-Year Net Savings']:,.0f}", border=1, align="R", new_x="RIGHT")
+        pdf.ln()
 
-        return bytes(pdf.output())
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.cell(0, 6, "Generated by FlocBot ROI Estimator", align="C")
 
+    return bytes(pdf.output())
+
+
+exp_c1, exp_c2 = st.columns(2)
+with exp_c1:
     pdf_bytes = generate_pdf()
     st.download_button(
         label="Download PDF Summary",
         data=pdf_bytes,
         file_name="flocbot_roi_estimate.pdf",
         mime="application/pdf",
+        use_container_width=True,
+    )
+with exp_c2:
+    summary_text = (
+        f"FlocBot ROI Estimate ({datetime.now().strftime('%Y-%m-%d')})\n"
+        f"{'='*45}\n"
+        f"Annual Chemical Cost: ${baseline_cost:,.0f} ({baseline_label})\n"
+        f"Avoidable Overfeed: {overfeed_pct:.1f}%\n"
+        f"Estimated Annual Savings: ${annual_sav:,.0f}\n"
+        f"Payback Period: {format_payback(payback_yrs)}\n"
+        f"5-Year Net Savings: ${net_5yr:,.0f}\n"
+    )
+    if break_even is not None:
+        summary_text += f"Break-even Overfeed: {break_even:.1f}%\n"
+    st.download_button(
+        label="Copy Summary (text)",
+        data=summary_text,
+        file_name="flocbot_roi_summary.txt",
+        mime="text/plain",
+        use_container_width=True,
     )
