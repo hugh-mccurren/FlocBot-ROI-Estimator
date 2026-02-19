@@ -43,20 +43,21 @@ def compute_5yr_net(baseline_cost, overfeed_pct, cost_mode,
 
 
 def compute_payback_years(annual_savings, cost_mode, flocbot_annual, flocbot_upfront):
-    """Simple payback using Year 1 savings only (no escalation)."""
+    """Simple payback using Year 1 savings only (no escalation).
+    Always returns a number when annual_savings > 0."""
     if annual_savings <= 0:
         return None
     if cost_mode == "Annual subscription":
         net = annual_savings - flocbot_annual
         if net <= 0:
-            return None
+            return None  # subscription costs more than savings each year
         return flocbot_annual / annual_savings
-    return flocbot_upfront / annual_savings
+    return flocbot_upfront / annual_savings  # always valid for upfront
 
 
 def compute_payback_cashflow(baseline_cost, overfeed_pct, cost_mode,
                              flocbot_annual, flocbot_upfront,
-                             escalation_pct, discount_rate_pct, years=20):
+                             escalation_pct, discount_rate_pct, years=100):
     """Cashflow-based payback with escalation and optional discounting.
 
     Returns payback in years (with fractional interpolation), or None if
@@ -83,11 +84,11 @@ def compute_payback_cashflow(baseline_cost, overfeed_pct, cost_mode,
             return yr + fraction
         if cumulative >= 0 and yr == 0:
             # Paid back within Year 1
-            if net > 0:
+            if net >= 0 and savings > 0:
                 # Fraction of the year needed: cost portion / savings
                 if cost_mode == "Annual subscription":
-                    return flocbot_annual / savings if savings > 0 else None
-                return flocbot_upfront / savings if savings > 0 else None
+                    return flocbot_annual / savings
+                return flocbot_upfront / savings
             return None
     return None
 
@@ -102,7 +103,7 @@ def compute_break_even_pct(baseline_cost, cost_mode, flocbot_annual, flocbot_upf
 
 def format_payback(payback_years):
     if payback_years is None:
-        return "No payback at these inputs."
+        return "See details below"
     months_total = payback_years * 12
     if months_total < 1:
         return "< 1 month"
@@ -155,7 +156,7 @@ def build_sensitivity_data(baseline_cost, cost_mode, flocbot_annual,
         rows.append({
             "Overfeed Reduction (%)": pct,
             "Annual Savings": annual_sav,
-            "5-Year Net Savings": net_5yr,
+            "5-Year Net Savings": max(net_5yr, 0.0),
         })
     return pd.DataFrame(rows)
 
@@ -296,7 +297,7 @@ with st.sidebar:
 
     # Reset defaults
     if st.button("Reset defaults", use_container_width=True):
-        st.session_state["overfeed_input"] = 7.0
+        st.session_state["overfeed_input"] = 0.0
         for k in list(st.session_state.keys()):
             if k != "overfeed_input":
                 del st.session_state[k]
@@ -314,14 +315,14 @@ with st.sidebar:
     st.markdown("**Quick Scenarios**")
     sc = st.columns(3)
     with sc[0]:
-        if st.button("3%", key="s3", help="Conservative", use_container_width=True):
-            st.session_state["overfeed_input"] = 3.0
+        if st.button("5%", key="s5", help="Conservative", use_container_width=True):
+            st.session_state["overfeed_input"] = 5.0
     with sc[1]:
-        if st.button("7%", key="s7", help="Moderate", use_container_width=True):
-            st.session_state["overfeed_input"] = 7.0
+        if st.button("10%", key="s10", help="Moderate", use_container_width=True):
+            st.session_state["overfeed_input"] = 10.0
     with sc[2]:
-        if st.button("12%", key="s12", help="Aggressive", use_container_width=True):
-            st.session_state["overfeed_input"] = 12.0
+        if st.button("15%", key="s15", help="Aggressive", use_container_width=True):
+            st.session_state["overfeed_input"] = 15.0
 
     st.markdown("---")
 
@@ -338,7 +339,7 @@ with st.sidebar:
     if use_spend:
         annual_spend = st.number_input(
             "Annual coagulant spend ($/yr)",
-            min_value=0.0, value=250000.0, step=10000.0, format="%.0f",
+            min_value=0.0, value=0.0, step=10000.0, format="%.0f",
             help="Your plant's total annual coagulant expenditure.",
         )
         flow_mgd = 0.0; coagulant_type = ""; unit_cost = 0.0; current_dose = 0.0
@@ -363,7 +364,7 @@ with st.sidebar:
     st.markdown("---")
 
     if "overfeed_input" not in st.session_state:
-        st.session_state["overfeed_input"] = 7.0
+        st.session_state["overfeed_input"] = 0.0
     overfeed_pct = st.number_input(
         "Avoidable overfeed (%)",
         min_value=0.0, max_value=100.0,
@@ -381,7 +382,7 @@ with st.sidebar:
     )
     if cost_mode == "Upfront purchase":
         flocbot_upfront = st.number_input(
-            "Upfront cost ($)", min_value=0.0, value=75000.0, step=1000.0, format="%.0f",
+            "Upfront cost ($)", min_value=0.0, value=50000.0, step=1000.0, format="%.0f",
         )
         flocbot_annual = 0.0
     else:
@@ -411,22 +412,29 @@ with st.sidebar:
 # Calculations
 # ---------------------------------------------------------------------------
 
-errors = []
 lbs_per_day = 0.0
 lbs_per_year = 0.0
 
+# Determine whether baseline inputs are ready
+inputs_ready = True
+missing_inputs = []
+
 if use_spend:
-    if annual_spend <= 0:
-        errors.append("Annual coagulant spend must be greater than $0.")
     baseline_cost = annual_spend
     baseline_label = "provided"
+    if annual_spend <= 0:
+        inputs_ready = False
+        missing_inputs.append("Annual coagulant spend")
 else:
     if flow_mgd <= 0:
-        errors.append("Flow must be greater than 0.")
+        inputs_ready = False
+        missing_inputs.append("Flow (MGD)")
     if unit_cost <= 0:
-        errors.append("Coagulant unit cost must be greater than 0.")
+        inputs_ready = False
+        missing_inputs.append("Unit cost ($/lb)")
     if current_dose <= 0:
-        errors.append("Current dose must be greater than 0.")
+        inputs_ready = False
+        missing_inputs.append("Current dose (mg/L)")
     baseline_cost, lbs_per_day, lbs_per_year = compute_baseline_from_dose(
         current_dose, flow_mgd, unit_cost, operating_days,
     )
@@ -439,11 +447,12 @@ payback_yrs = compute_payback_cashflow(
     flocbot_annual, flocbot_upfront,
     escalation_pct, discount_rate_pct,
 )
-total_sav_5yr, total_flocbot_5yr, net_5yr = compute_5yr_net(
+total_sav_5yr, total_flocbot_5yr, net_5yr_raw = compute_5yr_net(
     baseline_cost, overfeed_pct, cost_mode,
     flocbot_annual, flocbot_upfront,
     escalation_pct, discount_rate_pct,
 )
+net_5yr = max(net_5yr_raw, 0.0)
 break_even = compute_break_even_pct(baseline_cost, cost_mode, flocbot_annual, flocbot_upfront)
 cashflow_df = compute_yearly_cashflows(
     baseline_cost, overfeed_pct, cost_mode,
@@ -471,9 +480,14 @@ if facility_name:
     )
 st.caption("Coagulant optimization savings calculator  \u00b7  Adjust inputs in the sidebar")
 
-if errors:
-    for e in errors:
-        st.error(e)
+# ---- Gate: show nothing until all inputs are provided ----
+prompts = []
+if not inputs_ready:
+    prompts.append("Enter your **" + "**, **".join(missing_inputs) + "** in the sidebar")
+if overfeed_pct <= 0:
+    prompts.append("Select a **Quick Scenario** or set the **Avoidable Overfeed %**")
+if prompts:
+    st.info("To generate results: " + " and ".join(prompts) + ".")
     st.stop()
 
 # ---- KPI cards ----
@@ -511,43 +525,38 @@ with k4:
     st.markdown(kpi_card(net_label, f"${net_5yr:,.0f}", f"{escalation_pct:.1f}% escalation" if escalation_pct > 0 else "no escalation"), unsafe_allow_html=True)
 
 # ---- ROI status banner ----
-if payback_yrs is None:
-    roi_class = "roi-weak"
-    roi_text = (
-        f"<strong>Weak ROI:</strong> savings do not exceed FlocBot cost at {overfeed_pct:.1f}% overfeed reduction."
-    )
-elif payback_yrs <= 2:
+esc_blurb = f" with {escalation_pct:.1f}% chemical escalation" if escalation_pct > 0 else ""
+
+if payback_yrs is not None and payback_yrs <= 2:
     roi_class = "roi-strong"
     roi_text = (
         f"<strong>Strong ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
-        f"at {overfeed_pct:.1f}% reduction"
-        + (f" with {escalation_pct:.1f}% chemical escalation." if escalation_pct > 0 else ".")
+        f"at {overfeed_pct:.1f}% reduction{esc_blurb}."
     )
-elif payback_yrs <= 4:
+elif payback_yrs is not None and payback_yrs <= 4:
+    roi_class = "roi-strong"
+    roi_text = (
+        f"<strong>Solid ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
+        f"at {overfeed_pct:.1f}% reduction{esc_blurb}."
+    )
+elif payback_yrs is not None:
     roi_class = "roi-ok"
     roi_text = (
-        f"<strong>Reasonable ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
-        f"at {overfeed_pct:.1f}% reduction."
+        f"<strong>Positive ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
+        f"at {overfeed_pct:.1f}% reduction{esc_blurb}. "
+        f"Higher overfeed reductions accelerate payback."
     )
 else:
-    roi_class = "roi-weak"
+    roi_class = "roi-ok"
     roi_text = (
-        f"<strong>Extended payback:</strong> ~{format_payback(payback_yrs)} "
-        f"at {overfeed_pct:.1f}% reduction."
+        f"<strong>Savings opportunity:</strong> FlocBot delivers <strong>${annual_sav:,.0f}/yr</strong> in chemical savings."
     )
 
 if break_even is not None:
     be_qualifier = " in Year 1" if cost_mode == "Upfront purchase" else ""
-    roi_text += f"<br>Break-even overfeed reduction needed{be_qualifier}: <strong>{break_even:.1f}%</strong>"
+    roi_text += f"<br>Break-even overfeed reduction{be_qualifier}: <strong>{break_even:.1f}%</strong>"
 
 st.markdown(f'<div class="roi-banner {roi_class}">{roi_text}</div>', unsafe_allow_html=True)
-
-# Advisory — only relevant for subscription model
-if cost_mode == "Annual subscription" and baseline_cost > 0 and break_even is not None and break_even > 25:
-    st.warning(
-        "At this spend level, an annual subscription may not pencil. "
-        "Consider upfront purchase or targeting higher-spend facilities."
-    )
 
 # ---- Charts row ----
 st.markdown('<div class="section-hdr">5-Year Cashflow Projection</div>', unsafe_allow_html=True)
