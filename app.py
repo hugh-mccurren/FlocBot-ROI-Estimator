@@ -1,4 +1,7 @@
 import streamlit as st
+import keep_alive
+keep_alive.start()
+
 from fpdf import FPDF
 import pandas as pd
 import altair as alt
