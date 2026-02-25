@@ -183,6 +183,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── UptimeRobot keyword marker (hidden HTML, renders on every load) ─────
+st.markdown("<!-- APP_READY_FLOCBOT_ROI -->", unsafe_allow_html=True)
+
 st.markdown("""
 <style>
 /* ---- Global ---- */
