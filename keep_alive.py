@@ -1,23 +1,22 @@
 """
-Background keep-alive ping for Streamlit Cloud.
+Background keep-alive ping for Streamlit hosting platforms.
 
-Streamlit Cloud sleeps free-tier apps after ~7 days of no traffic (or sooner).
-This module starts a daemon thread that pings the app's built-in health
-endpoint every 5 minutes, helping keep the app awake as long as at least one
-Streamlit server process is running.
+Keeps the Streamlit process responsive by periodically hitting the local
+health endpoint.  Works on both Streamlit Cloud (port 8501) and Render
+(dynamic $PORT).
 
-NOTE: This alone is NOT enough — Streamlit Cloud can still sleep the entire
-container if no *browser sessions* are open.  Pair this with an external
-uptime monitor (e.g. UptimeRobot free tier) that hits your app URL every
-5 minutes for reliable 24/7 uptime.
+Pair with an external uptime monitor (e.g. UptimeRobot) that hits the
+public URL every 5 minutes for reliable always-on behaviour.
 """
 
+import os
 import threading
 import time
 import urllib.request
 
 _INTERVAL_SECONDS = 5 * 60  # 5 minutes
-_HEALTH_URL = "https://localhost:8501/_stcore/health"
+_PORT = os.environ.get("PORT", "8501")
+_HEALTH_URL = f"http://localhost:{_PORT}/_stcore/health"
 _started = False
 
 
