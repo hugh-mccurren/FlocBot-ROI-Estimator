@@ -157,7 +157,7 @@ def build_sensitivity_data(baseline_cost, cost_mode, flocbot_annual,
             escalation_pct, discount_rate_pct,
         )
         rows.append({
-            "Overfeed Reduction (%)": pct,
+            "Overdosing Reduction (%)": pct,
             "Annual Savings": annual_sav,
             "5-Year Net Savings": max(net_5yr, 0.0),
         })
@@ -166,7 +166,7 @@ def build_sensitivity_data(baseline_cost, cost_mode, flocbot_annual,
 
 def build_sensitivity_table(sens_df):
     display = sens_df.copy()
-    display["Overfeed Reduction (%)"] = display["Overfeed Reduction (%)"].apply(lambda x: f"{x}%")
+    display["Overdosing Reduction (%)"] = display["Overdosing Reduction (%)"].apply(lambda x: f"{x}%")
     display["Annual Savings"] = display["Annual Savings"].apply(lambda x: f"${x:,.0f}")
     display["5-Year Net Savings"] = display["5-Year Net Savings"].apply(lambda x: f"${x:,.0f}")
     return display
@@ -372,10 +372,10 @@ with st.sidebar:
     if "overfeed_input" not in st.session_state:
         st.session_state["overfeed_input"] = 0.0
     overfeed_pct = st.number_input(
-        "Avoidable overfeed (%)",
+        "Overdosing (%)",
         min_value=0.0, max_value=100.0,
         step=0.5, format="%.1f",
-        help="Estimated % of current coagulant use that is avoidable overfeed.",
+        help="Estimated % of current coagulant use that is overdosing.",
         key="overfeed_input",
     )
 
@@ -491,7 +491,7 @@ prompts = []
 if not inputs_ready:
     prompts.append("Enter your **" + "**, **".join(missing_inputs) + "** in the sidebar")
 if overfeed_pct <= 0:
-    prompts.append("Select a **Quick Scenario** or set the **Avoidable Overfeed %**")
+    prompts.append("Select a **Quick Scenario** or set the **Overdosing %**")
 if prompts:
     st.info("To generate results: " + " and ".join(prompts) + ".")
     st.stop()
@@ -550,7 +550,7 @@ elif payback_yrs is not None:
     roi_text = (
         f"<strong>Positive ROI:</strong> estimated payback ~{format_payback(payback_yrs)} "
         f"at {overfeed_pct:.1f}% reduction{esc_blurb}. "
-        f"Higher overfeed reductions accelerate payback."
+        f"Higher overdosing reductions accelerate payback."
     )
 else:
     roi_class = "roi-ok"
@@ -560,7 +560,7 @@ else:
 
 if break_even is not None:
     be_qualifier = " in Year 1" if cost_mode == "Upfront purchase" else ""
-    roi_text += f"<br>Break-even overfeed reduction{be_qualifier}: <strong>{break_even:.1f}%</strong>"
+    roi_text += f"<br>Break-even overdosing reduction{be_qualifier}: <strong>{break_even:.1f}%</strong>"
 
 st.markdown(f'<div class="roi-banner {roi_class}">{roi_text}</div>', unsafe_allow_html=True)
 
@@ -623,12 +623,12 @@ with chart_left:
 with chart_right:
     # Sensitivity chart
     sr = sens_raw.copy()
-    sr["pct_str"] = sr["Overfeed Reduction (%)"].apply(lambda x: f"{x}%")
+    sr["pct_str"] = sr["Overdosing Reduction (%)"].apply(lambda x: f"{x}%")
 
     # Highlight point for selected overfeed
     selected_net = None
     for _, row in sr.iterrows():
-        if row["Overfeed Reduction (%)"] == overfeed_pct:
+        if row["Overdosing Reduction (%)"] == overfeed_pct:
             selected_net = row["5-Year Net Savings"]
             break
 
@@ -637,11 +637,11 @@ with chart_right:
         strokeWidth=2.5,
         color="#6366f1",
     ).encode(
-        x=alt.X("Overfeed Reduction (%):Q", title="Overfeed Reduction (%)",
+        x=alt.X("Overdosing Reduction (%):Q", title="Overdosing Reduction (%)",
                  scale=alt.Scale(domain=[0, 14])),
         y=alt.Y("5-Year Net Savings:Q", title="5-Year Net Savings ($)"),
         tooltip=[
-            alt.Tooltip("Overfeed Reduction (%):Q", format=".0f", title="Reduction"),
+            alt.Tooltip("Overdosing Reduction (%):Q", format=".0f", title="Reduction"),
             alt.Tooltip("5-Year Net Savings:Q", format="$,.0f"),
         ],
     )
@@ -655,13 +655,13 @@ with chart_right:
     # Add selected-point highlight if it matches a sensitivity row
     if selected_net is not None:
         highlight_df = pd.DataFrame({
-            "Overfeed Reduction (%)": [overfeed_pct],
+            "Overdosing Reduction (%)": [overfeed_pct],
             "5-Year Net Savings": [selected_net],
         })
         highlight = alt.Chart(highlight_df).mark_point(
             size=160, filled=True, color="#ef4444",
         ).encode(
-            x="Overfeed Reduction (%):Q",
+            x="Overdosing Reduction (%):Q",
             y="5-Year Net Savings:Q",
         )
         layers.append(highlight)
@@ -670,7 +670,7 @@ with chart_right:
         labelFontSize=11, titleFontSize=12,
     ).configure_view(strokeWidth=0)
     st.altair_chart(sens_chart, use_container_width=True)
-    st.caption("Sensitivity across overfeed reduction levels")
+    st.caption("Sensitivity across overdosing reduction levels")
 
 # ---- Sensitivity table ----
 st.markdown('<div class="section-hdr">Sensitivity Table</div>', unsafe_allow_html=True)
@@ -700,13 +700,258 @@ with st.expander("Calculation details"):
     st.markdown(f"**5-year projection{esc_note}{disc_note}:**")
     st.latex(
         r"\text{Net} = \sum_{y=0}^{4} "
-        r"\frac{\text{Baseline} \times \text{Overfeed\%} \times (1{+}r)^{y}}{(1{+}d)^{y}}"
+        r"\frac{\text{Baseline} \times \text{Overdose\%} \times (1{+}r)^{y}}{(1{+}d)^{y}}"
         r" \;-\; \text{FlocBot cost}"
     )
     det_c1, det_c2, det_c3 = st.columns(3)
     det_c1.metric("Gross Savings (5 yr)", f"${total_sav_5yr:,.0f}")
     det_c2.metric("FlocBot Cost (5 yr)", f"${total_flocbot_5yr:,.0f}")
     det_c3.metric("Net Savings (5 yr)", f"${net_5yr:,.0f}")
+
+# ---- Decision Analysis (MCDA) --------------------------------------------------------
+st.markdown('<div class="section-hdr">Decision Analysis</div>', unsafe_allow_html=True)
+
+_ALT_FULL = [
+    "Conventional Jar Testing",
+    "Streaming Current Monitor Guided Control",
+    "Zeta Potential Analyzer Guided Control",
+    "FlocBot",
+]
+_ALT_SHORT = ["Conventional", "Streaming Current", "Zeta Potential", "FlocBot"]
+_ALT_FULL_MAP = dict(zip(_ALT_SHORT, _ALT_FULL))
+
+# (category, criterion, default_importance, [conv, sc, zp, fb], definition)
+_MCDA_CRITERIA = [
+    ("Public Health & Safety", "Treatment reliability", 0.18,
+     [3, 4, 4, 5],
+     "Consistency of meeting target water quality under varying raw water conditions"),
+    ("Public Health & Safety", "Risk reduction from underdosing / operator error", 0.16,
+     [2, 4, 4, 5],
+     "Ability to reduce risks caused by poor dose selection, delayed adjustments, or operator subjectivity"),
+    ("Environmental", "Chemical / sludge reduction", 0.14,
+     [2, 3, 4, 5],
+     "Likelihood of reducing excess coagulant/polymer use, sludge generation, and disposal burden"),
+    ("Environmental", "Resource efficiency / secondary environmental impact", 0.10,
+     [3, 3, 4, 4],
+     "Energy, water, consumables, and downstream environmental effects"),
+    ("Practicality", "Ease of implementation", 0.12,
+     [5, 3, 2, 3],
+     "Ease of deployment, integration, and everyday use at an operating plant"),
+    ("Practicality", "Training and workflow burden", 0.10,
+     [4, 3, 2, 3],
+     "Staff retraining, workflow disruption, calibration burden, and support needs"),
+    ("Practicality", "Data visibility / process control insight", 0.10,
+     [2, 4, 4, 5],
+     "Quality of real-time or near-real-time information available to support operator decisions"),
+    ("Operational Value", "Responsiveness to changing raw water conditions", 0.10,
+     [2, 4, 4, 5],
+     "Ability to detect or adapt to rapid influent variability and changing treatment conditions"),
+]
+
+_MCDA_CAT_LABELS = [
+    "Health & Safety", "Health & Safety",
+    "Environmental", "Environmental",
+    "Practicality", "Practicality", "Practicality",
+    "Operational Value",
+]
+_MCDA_CRIT_LABELS = [
+    "Treatment reliability",
+    "Underdosing / error risk",
+    "Chemical / sludge reduction",
+    "Resource efficiency",
+    "Ease of implementation",
+    "Training / workflow burden",
+    "Data visibility / process control",
+    "Raw water responsiveness",
+]
+
+_mcda_default_df = pd.DataFrame({
+    "Category": _MCDA_CAT_LABELS,
+    "Criterion": _MCDA_CRIT_LABELS,
+    "Importance": [c[2] for c in _MCDA_CRITERIA],
+    **{short: [c[3][j] for c in _MCDA_CRITERIA] for j, short in enumerate(_ALT_SHORT)},
+})
+
+if "mcda_reset_v" not in st.session_state:
+    st.session_state.mcda_reset_v = 0
+
+
+def _mcda_reset():
+    st.session_state.mcda_reset_v += 1
+
+
+# Placeholder so summary renders above expander but is computed after data_editor
+_mcda_summary_slot = st.container()
+
+with st.expander("Expand Decision Analysis (MCDA)", expanded=False):
+
+    # ---- 1. Intro note ----
+    st.markdown(
+        "This multi-criteria decision analysis (MCDA) complements the ROI results above "
+        "by providing a structured comparison of operational, environmental, and "
+        "public-health tradeoffs across four dosing and process-control approaches "
+        "commonly evaluated in water treatment. All weights and scores are fully editable."
+    )
+    st.markdown(
+        "<span style='font-size:0.82rem;color:#64748b;'>"
+        "More reliable coagulation and dosing control can reduce risk of inadequate "
+        "treatment performance, which can affect finished water quality delivered to "
+        "consumers.</span>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- 2. Controls row ----
+    _hdr1, _hdr2 = st.columns([5, 1])
+    with _hdr2:
+        st.button("Reset defaults", on_click=_mcda_reset, use_container_width=True)
+    with _hdr1:
+        st.markdown(
+            "<span style='font-size:0.82rem;color:#64748b;'>"
+            "<b>Score scale:</b> 1 = Poor &middot; 2 = Below average &middot; "
+            "3 = Moderate &middot; 4 = Good &middot; 5 = Excellent<br>"
+            "Importance weights should sum to 1.00.</span>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- 3. Editable comparison table ----
+    mcda_edited = st.data_editor(
+        _mcda_default_df,
+        key=f"mcda_ed_{st.session_state.mcda_reset_v}",
+        column_config={
+            "Category": st.column_config.TextColumn(width=120),
+            "Criterion": st.column_config.TextColumn(width=230),
+            "Importance": st.column_config.NumberColumn(
+                min_value=0.00, max_value=1.00, step=0.01, format="%.2f",
+                help="Decimal weight (0.00 - 1.00). Weights should sum to 1.00.",
+            ),
+            **{
+                short: st.column_config.NumberColumn(
+                    min_value=1, max_value=5, step=1,
+                    help="1 = Poor ... 5 = Excellent",
+                )
+                for short in _ALT_SHORT
+            },
+        },
+        disabled=["Category", "Criterion"],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    # ---- Importance total ----
+    _w = mcda_edited["Importance"].values.astype(float)
+    _w_total = float(_w.sum())
+    _w_valid = abs(_w_total - 1.0) < 0.005
+
+    if _w_valid:
+        st.markdown(
+            f"<span style='font-size:0.82rem;color:#64748b;'>"
+            f"<b>Importance total:</b> {_w_total:.2f}</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<span style='font-size:0.82rem;color:#e11d48;'>"
+            f"<b>Importance total:</b> {_w_total:.2f} &mdash; "
+            f"Importance must sum to 1.00 to calculate results.</span>",
+            unsafe_allow_html=True,
+        )
+
+    # ---- 4. Criterion definitions ----
+    st.markdown(
+        "<details style='margin-top:0.3rem;'><summary style='font-size:0.82rem;"
+        "color:#64748b;cursor:pointer;'>Criterion definitions</summary>"
+        "<ul style='font-size:0.8rem;color:#475569;margin-top:0.4rem;'>"
+        + "".join(f"<li><b>{c[1]}</b>: {c[4]}</li>" for c in _MCDA_CRITERIA)
+        + "</ul></details>",
+        unsafe_allow_html=True,
+    )
+
+    # ---- Compute MCDA scores (only when weights are valid) ----
+    if _w_valid:
+        mcda_totals = {}
+        for short in _ALT_SHORT:
+            _s = mcda_edited[short].values.astype(float)
+            mcda_totals[short] = float((_w * _s).sum())
+
+        mcda_ranked = sorted(mcda_totals.items(), key=lambda x: x[1], reverse=True)
+        mcda_best_short, mcda_best_score = mcda_ranked[0]
+        mcda_second_short, mcda_second_score = mcda_ranked[1]
+        mcda_gap = mcda_best_score - mcda_second_score
+        mcda_best_full = _ALT_FULL_MAP[mcda_best_short]
+
+        # ---- 5. Score summary cards ----
+        st.markdown("---")
+        _rc = st.columns(4)
+        for i, (name, score) in enumerate(mcda_ranked):
+            _rc[i].metric(f"#{i + 1} {name}", f"{score:.2f}")
+
+        # ---- 6. Recommendation & interpretation ----
+        st.markdown(f"**Recommendation:** {mcda_best_full}")
+
+        # Dynamic interpretation - strengths and tradeoffs
+        _crit_labels = [c[1].lower() for c in _MCDA_CRITERIA]
+        _strengths = []
+        _tradeoffs = []
+        for ci in range(len(_MCDA_CRITERIA)):
+            w_val = float(mcda_edited[mcda_best_short].iloc[ci])
+            others = {s: float(mcda_edited[s].iloc[ci]) for s in _ALT_SHORT if s != mcda_best_short}
+            max_other = max(others.values())
+            if w_val > max_other:
+                _strengths.append((_w[ci] * (w_val - max_other), _crit_labels[ci]))
+            elif w_val < max_other:
+                better = [s for s, v in others.items() if v == max_other]
+                _tradeoffs.append((_w[ci] * (max_other - w_val), _crit_labels[ci], better))
+        _strengths.sort(reverse=True)
+        _tradeoffs.sort(reverse=True)
+
+        _str_names = [s[1] for s in _strengths[:3]]
+        if _str_names:
+            if len(_str_names) == 1:
+                _str_phrase = _str_names[0]
+            elif len(_str_names) == 2:
+                _str_phrase = f"{_str_names[0]} and {_str_names[1]}"
+            else:
+                _str_phrase = f"{', '.join(_str_names[:-1])}, and {_str_names[-1]}"
+            mcda_interp = (
+                f"{mcda_best_full} ranks highest overall due to stronger "
+                f"{_str_phrase}."
+            )
+        else:
+            mcda_interp = f"{mcda_best_full} ranks highest overall across the weighted criteria."
+
+        if _tradeoffs:
+            _tw_alts = _tradeoffs[0][2]
+            _tw_crit = _tradeoffs[0][1]
+            _tw_who = " and ".join(_ALT_FULL_MAP[a].lower() for a in _tw_alts)
+            mcda_interp += (
+                f" Alternatives such as {_tw_who} are easier to implement but"
+                f" provide less consistency and weaker decision support under"
+                f" changing conditions."
+            )
+
+        st.info(mcda_interp)
+    else:
+        # Weights invalid - show placeholder
+        mcda_ranked = [(s, 0.0) for s in _ALT_SHORT]
+        mcda_best_short = _ALT_SHORT[-1]
+        mcda_best_score = 0.0
+        mcda_second_short = _ALT_SHORT[0]
+        mcda_gap = 0.0
+        mcda_interp = ""
+
+# ---- Summary row (always visible above expander) ----
+with _mcda_summary_slot:
+    if _w_valid:
+        _s1, _s2, _s3 = st.columns([1.2, 1.4, 3.4])
+        _s1.markdown(f"**Recommended:** {mcda_best_short}")
+        _s2.markdown(f"**Score:** {mcda_best_score:.2f}")
+        _s3.markdown(f"*{mcda_interp}*")
+    else:
+        st.markdown(
+            "<span style='font-size:0.85rem;color:#e11d48;'>"
+            "Adjust Importance weights to sum to 1.00 to see MCDA results.</span>",
+            unsafe_allow_html=True,
+        )
 
 # ---- PDF Download ----
 st.markdown('<div class="section-hdr">Export</div>', unsafe_allow_html=True)
@@ -752,7 +997,7 @@ def generate_pdf():
         add_row("Unit Cost:", f"${unit_cost:.4f}/lb")
         add_row("Current Dose:", f"{current_dose:.1f} mg/L")
         add_row("Operating Days:", str(operating_days))
-    add_row("Avoidable Overfeed:", f"{overfeed_pct:.1f}%")
+    add_row("Overdosing:", f"{overfeed_pct:.1f}%")
     if cost_mode == "Annual subscription":
         add_row("FlocBot Annual Cost:", f"${flocbot_annual:,.0f}")
     else:
@@ -771,7 +1016,7 @@ def generate_pdf():
     net_lbl = "5-Year Net Savings (NPV):" if discount_rate_pct > 0 else "5-Year Net Savings:"
     add_row(net_lbl, f"${net_5yr:,.0f}")
     if break_even is not None:
-        be_lbl = "Break-even Overfeed (Year 1):" if cost_mode == "Upfront purchase" else "Break-even Overfeed:"
+        be_lbl = "Break-even Overdosing (Year 1):" if cost_mode == "Upfront purchase" else "Break-even Overdosing:"
         add_row(be_lbl, f"{break_even:.1f}%")
 
     # Cashflow table
@@ -794,19 +1039,69 @@ def generate_pdf():
 
     # Sensitivity table
     pdf.ln(4)
-    section_header("Sensitivity (Overfeed Reduction)")
+    section_header("Sensitivity (Overdosing Reduction)")
     pdf.set_font("Helvetica", "B", 9)
     col_w = [40, 50, 50]
-    headers = ["Overfeed %", "Annual Savings", "5-Yr Net Savings"]
+    headers = ["Overdosing %", "Annual Savings", "5-Yr Net Savings"]
     for i, h in enumerate(headers):
         pdf.cell(col_w[i], 7, h, border=1, align="C", new_x="RIGHT")
     pdf.ln()
     pdf.set_font("Helvetica", "", 9)
     for _, row in sens_raw.iterrows():
-        pdf.cell(col_w[0], 7, f"{row['Overfeed Reduction (%)']:.0f}%", border=1, align="C", new_x="RIGHT")
+        pdf.cell(col_w[0], 7, f"{row['Overdosing Reduction (%)']:.0f}%", border=1, align="C", new_x="RIGHT")
         pdf.cell(col_w[1], 7, f"${row['Annual Savings']:,.0f}", border=1, align="R", new_x="RIGHT")
         pdf.cell(col_w[2], 7, f"${row['5-Year Net Savings']:,.0f}", border=1, align="R", new_x="RIGHT")
         pdf.ln()
+
+    # Decision Analysis (MCDA)
+    pdf.add_page()
+    section_header("Decision Analysis (MCDA)")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.multi_cell(0, 5,
+        "Multi-Criteria Decision Analysis comparing four dosing/control alternatives "
+        "across weighted operational, environmental, and public-health criteria.",
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    # MCDA ranking
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Ranking", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    for rank_i, (r_name, r_score) in enumerate(mcda_ranked):
+        pdf.cell(0, 6,
+            f"  #{rank_i + 1}  {_ALT_FULL_MAP[r_name]}  -  {r_score:.2f}",
+            new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(0, 6,
+        f"Score gap (1st vs 2nd): +{mcda_gap:.2f}",
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    # MCDA scores table
+    pdf.set_font("Helvetica", "B", 8)
+    mcda_cw = [55, 16, 25, 25, 25, 25]
+    mcda_hdrs = ["Criterion", "Wt", "Conv.", "Stream.", "Zeta", "FlocBot"]
+    for i, h in enumerate(mcda_hdrs):
+        pdf.cell(mcda_cw[i], 6, h, border=1, align="C", new_x="RIGHT")
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 8)
+    for ci in range(len(_MCDA_CRITERIA)):
+        pdf.cell(mcda_cw[0], 6, _MCDA_CRITERIA[ci][1][:38], border=1, new_x="RIGHT")
+        pdf.cell(mcda_cw[1], 6, f"{_w[ci]:.2f}", border=1, align="C", new_x="RIGHT")
+        for j in range(4):
+            pdf.cell(mcda_cw[2 + j], 6,
+                str(int(mcda_edited[_ALT_SHORT[j]].iloc[ci])),
+                border=1, align="C", new_x="RIGHT")
+        pdf.ln()
+    pdf.ln(3)
+
+    # Recommendation
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Recommendation", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    _interp_safe = mcda_interp.encode("latin-1", "replace").decode("latin-1")
+    pdf.multi_cell(0, 5, _interp_safe, new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(8)
     pdf.set_font("Helvetica", "I", 8)
@@ -830,13 +1125,18 @@ with exp_c2:
         f"FlocBot ROI Estimate ({datetime.now().strftime('%Y-%m-%d')})\n"
         f"{'='*45}\n"
         f"Annual Chemical Cost: ${baseline_cost:,.0f} ({baseline_label})\n"
-        f"Avoidable Overfeed: {overfeed_pct:.1f}%\n"
+        f"Overdosing: {overfeed_pct:.1f}%\n"
         f"Estimated Annual Savings: ${annual_sav:,.0f}\n"
         f"Payback Period: {format_payback(payback_yrs)}\n"
         f"5-Year Net Savings: ${net_5yr:,.0f}\n"
     )
     if break_even is not None:
-        summary_text += f"Break-even Overfeed: {break_even:.1f}%\n"
+        summary_text += f"Break-even Overdosing: {break_even:.1f}%\n"
+    summary_text += f"\nDecision Analysis (MCDA)\n{'-'*45}\n"
+    for rank_i, (r_name, r_score) in enumerate(mcda_ranked):
+        summary_text += f"  #{rank_i + 1}  {_ALT_FULL_MAP[r_name]}  -  {r_score:.2f}\n"
+    summary_text += f"Score gap (1st vs 2nd): +{mcda_gap:.2f}\n"
+    summary_text += f"Recommendation: {mcda_interp}\n"
     st.download_button(
         label="Copy Summary (text)",
         data=summary_text,
