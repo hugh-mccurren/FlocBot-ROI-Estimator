@@ -405,14 +405,8 @@ with st.sidebar:
             value=6.0, step=0.5, format="%.1f",
             help="Expected annual increase in chemical prices (~6% industry avg).",
         )
-        discount_rate_pct = st.number_input(
-            "Discount rate (%)", min_value=0.0, max_value=50.0,
-            value=0.0, step=0.5, format="%.1f",
-            help="If > 0, future savings are discounted to present value (NPV).",
-        )
-        operating_days = st.number_input(
-            "Operating days/year", min_value=1, max_value=366, value=365, step=1,
-        )
+        discount_rate_pct = 0.0
+        operating_days = 365
 
 # ---------------------------------------------------------------------------
 # Calculations
@@ -904,29 +898,29 @@ with st.expander("Expand Decision Analysis (MCDA)", expanded=False):
         _strengths.sort(reverse=True)
         _tradeoffs.sort(reverse=True)
 
-        _str_names = [s[1] for s in _strengths[:3]]
+        # Map verbose criterion names to punchy summary phrases
+        _SHORT_CRIT = {
+            "treatment reliability": "reliability",
+            "underdosing / operator error risk": "reduced operator error",
+            "chemical / sludge reduction": "improved chemical efficiency",
+            "resource efficiency": "resource efficiency",
+            "ease of implementation": "ease of implementation",
+            "training / workflow burden": "lower training burden",
+            "data visibility / process control": "process visibility",
+            "raw water responsiveness": "raw water responsiveness",
+        }
+        _str_names = [_SHORT_CRIT.get(s[1], s[1]) for s in _strengths[:3]]
         if _str_names:
-            if len(_str_names) == 1:
-                _str_phrase = _str_names[0]
-            elif len(_str_names) == 2:
-                _str_phrase = f"{_str_names[0]} and {_str_names[1]}"
-            else:
-                _str_phrase = f"{', '.join(_str_names[:-1])}, and {_str_names[-1]}"
-            mcda_interp = (
-                f"{mcda_best_full} ranks highest overall due to stronger "
-                f"{_str_phrase}."
-            )
+            mcda_interp = f"{mcda_best_short} ranks highest for {', '.join(_str_names)}."
         else:
-            mcda_interp = f"{mcda_best_full} ranks highest overall across the weighted criteria."
+            mcda_interp = f"{mcda_best_short} ranks highest across all weighted criteria."
 
         if _tradeoffs:
             _tw_alts = _tradeoffs[0][2]
-            _tw_crit = _tradeoffs[0][1]
             _tw_who = " and ".join(_ALT_FULL_MAP[a].lower() for a in _tw_alts)
             mcda_interp += (
-                f" Alternatives such as {_tw_who} are easier to implement but"
-                f" provide less consistency and weaker decision support under"
-                f" changing conditions."
+                f" Simpler options like {_tw_who} are easier to implement"
+                f" but provide less consistent, real-time decision support."
             )
 
         st.info(mcda_interp)
@@ -996,7 +990,6 @@ def generate_pdf():
         add_row("Coagulant Type:", coagulant_type)
         add_row("Unit Cost:", f"${unit_cost:.4f}/lb")
         add_row("Current Dose:", f"{current_dose:.1f} mg/L")
-        add_row("Operating Days:", str(operating_days))
     add_row("Overdosing:", f"{overfeed_pct:.1f}%")
     if cost_mode == "Annual subscription":
         add_row("FlocBot Annual Cost:", f"${flocbot_annual:,.0f}")
@@ -1004,8 +997,6 @@ def generate_pdf():
         add_row("FlocBot Upfront Cost:", f"${flocbot_upfront:,.0f}")
     if escalation_pct > 0:
         add_row("Chemical Escalation:", f"{escalation_pct:.1f}%/yr")
-    if discount_rate_pct > 0:
-        add_row("Discount Rate:", f"{discount_rate_pct:.1f}%")
 
     # Results
     pdf.ln(4)
