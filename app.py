@@ -901,17 +901,21 @@ with st.expander("Expand Decision Analysis (MCDA)", expanded=False):
         # Map verbose criterion names to punchy summary phrases
         _SHORT_CRIT = {
             "treatment reliability": "reliability",
-            "underdosing / operator error risk": "reduced operator error",
+            "risk reduction from underdosing / operator error": "reduced operator error",
             "chemical / sludge reduction": "improved chemical efficiency",
-            "resource efficiency": "resource efficiency",
+            "resource efficiency / secondary environmental impact": "resource efficiency",
             "ease of implementation": "ease of implementation",
-            "training / workflow burden": "lower training burden",
-            "data visibility / process control": "process visibility",
-            "raw water responsiveness": "raw water responsiveness",
+            "training and workflow burden": "lower training burden",
+            "data visibility / process control insight": "process visibility",
+            "responsiveness to changing raw water conditions": "raw water responsiveness",
         }
         _str_names = [_SHORT_CRIT.get(s[1], s[1]) for s in _strengths[:3]]
         if _str_names:
-            mcda_interp = f"{mcda_best_short} ranks highest for {', '.join(_str_names)}."
+            if len(_str_names) > 1:
+                _str_list = ", ".join(_str_names[:-1]) + ", and " + _str_names[-1]
+            else:
+                _str_list = _str_names[0]
+            mcda_interp = f"{mcda_best_short} ranks highest for {_str_list}."
         else:
             mcda_interp = f"{mcda_best_short} ranks highest across all weighted criteria."
 
