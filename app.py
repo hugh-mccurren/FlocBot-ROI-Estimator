@@ -397,16 +397,14 @@ with st.sidebar:
         )
         flocbot_upfront = 0.0
 
-    # Advanced
     st.markdown("---")
-    with st.expander("Advanced modeling"):
-        escalation_pct = st.number_input(
-            "Chemical escalation (%/yr)", min_value=0.0, max_value=50.0,
-            value=6.0, step=0.5, format="%.1f",
-            help="Expected annual increase in chemical prices (~6% industry avg).",
-        )
-        discount_rate_pct = 0.0
-        operating_days = 365
+    escalation_pct = st.number_input(
+        "Chemical escalation (%/yr)", min_value=0.0, max_value=50.0,
+        value=6.0, step=0.5, format="%.1f",
+        help="Expected annual increase in chemical prices (~6% industry avg).",
+    )
+    discount_rate_pct = 0.0
+    operating_days = 365
 
 # ---------------------------------------------------------------------------
 # Calculations
